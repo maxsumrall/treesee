@@ -178,6 +178,13 @@ function extractToolCallNames(content: unknown): string[] {
   return [...new Set(names)];
 }
 
+function countToolCalls(content: unknown): number {
+  if (!Array.isArray(content)) return 0;
+  return content.filter(
+    (part) => part && typeof part === "object" && (part as { type?: string }).type === "toolCall",
+  ).length;
+}
+
 function countTextWords(content: unknown): number {
   return extractTextBlocks(content)
     .flatMap((text) => words(text))
@@ -302,7 +309,7 @@ function buildBranches(reader: SessionReader): BranchNode[] {
     const assistantCount = entries.filter((entry) => entry.entry.type === "message" && entry.entry.message.role === "assistant").length;
     const toolCallCount = entries.reduce((total, entry) => {
       if (entry.entry.type !== "message" || entry.entry.message.role !== "assistant") return total;
-      return total + extractToolCallNames(entry.entry.message.content).length;
+      return total + countToolCalls(entry.entry.message.content);
     }, 0);
     const textWordCount = entries.reduce((total, entry) => {
       if (entry.entry.type === "branch_summary") return total + words(entry.entry.summary).length;
