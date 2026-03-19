@@ -603,7 +603,7 @@ class SessionSelectorComponent implements Component {
     const container = new Container();
     container.addChild(new DynamicBorder((text: string) => this.theme.fg("accent", text)));
     container.addChild(new Spacer(1));
-    container.addChild(new Text(this.theme.fg("accent", this.theme.bold("Select session")), 1, 0));
+    container.addChild(new Text(this.theme.fg("accent", this.theme.bold("Open session")), 1, 0));
     container.addChild(new Text(this.theme.fg("dim", `${rawKeyHint("↑↓", "navigate")}  ${keyHint("selectConfirm", "open")}  ${keyHint("selectCancel", "cancel")}`), 1, 0));
     container.addChild(new Spacer(1));
 
@@ -1328,7 +1328,7 @@ async function chooseSession(
         done(sorted);
       })
       .catch((error) => {
-      console.error("treesee: failed to load sessions", error);
+        console.error("treesee: failed to load sessions", error);
         done(null);
       });
 
@@ -1381,7 +1381,7 @@ async function openReaderForArgs(args: string, ctx: ExtensionCommandContext): Pr
 
 export default function treeseeExtension(pi: ExtensionAPI) {
   pi.registerCommand("treesee", {
-    description: "Open the current or selected pi session as a polished HTML conversation tree",
+    description: "Open the current, chosen, or explicit pi session as a polished HTML conversation tree",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) {
         pi.sendMessage(
