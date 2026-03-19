@@ -164,31 +164,42 @@ function extractTextBlocks(content: unknown): string[] {
   return out;
 }
 
-function extractToolCallNames(content: unknown): string[] {
+function extractToolCalls(content: unknown): Array<{ name?: string }> {
   if (!Array.isArray(content)) return [];
 
-  const names: string[] = [];
+  const out: Array<{ name?: string }> = [];
   for (const part of content) {
     if (!part || typeof part !== "object") continue;
     const record = part as { type?: string; name?: string };
-    if (record.type === "toolCall" && typeof record.name === "string") {
-      names.push(record.name);
+    if (record.type === "toolCall") {
+      out.push(record);
     }
   }
+  return out;
+}
+
+function extractToolCallNames(content: unknown): string[] {
+  const names = extractToolCalls(content)
+    .map((record) => record.name)
+    .filter((name): name is string => typeof name === "string");
   return [...new Set(names)];
 }
 
 function countToolCalls(content: unknown): number {
-  if (!Array.isArray(content)) return 0;
-  return content.filter(
-    (part) => part && typeof part === "object" && (part as { type?: string }).type === "toolCall",
-  ).length;
+  return extractToolCalls(content).length;
 }
 
 function countTextWords(content: unknown): number {
   return extractTextBlocks(content)
     .flatMap((text) => words(text))
     .length;
+}
+
+function countVisibleEntryWords(entry: VisibleEntry): number {
+  if (entry.type === "branch_summary" || entry.type === "compaction") {
+    return words(entry.summary).length;
+  }
+  return countTextWords(entry.message.content);
 }
 
 function getMessageRole(entry: SessionEntry): string | undefined {
@@ -294,6 +305,46 @@ function heuristicLabelForBranch(entries: VisibleNode[]): string {
   return "Conversation branch";
 }
 
+function summarizeBranchEntries(entries: VisibleNode[]): {
+  userCount: number;
+  assistantCount: number;
+  toolCallCount: number;
+  textWordCount: number;
+  branchSummaryCount: number;
+  compactionCount: number;
+} {
+  return entries.reduce((summary, entry) => {
+    if (entry.entry.type === "branch_summary") {
+      summary.branchSummaryCount += 1;
+      summary.textWordCount += countVisibleEntryWords(entry.entry);
+      return summary;
+    }
+
+    if (entry.entry.type === "compaction") {
+      summary.compactionCount += 1;
+      summary.textWordCount += countVisibleEntryWords(entry.entry);
+      return summary;
+    }
+
+    summary.textWordCount += countVisibleEntryWords(entry.entry);
+    if (entry.entry.message.role === "user") {
+      summary.userCount += 1;
+      return summary;
+    }
+
+    summary.assistantCount += 1;
+    summary.toolCallCount += countToolCalls(entry.entry.message.content);
+    return summary;
+  }, {
+    userCount: 0,
+    assistantCount: 0,
+    toolCallCount: 0,
+    textWordCount: 0,
+    branchSummaryCount: 0,
+    compactionCount: 0,
+  });
+}
+
 function buildBranches(reader: SessionReader): BranchNode[] {
   const roots = buildVisibleTree(reader);
   const activeIds = activeVisibleIds(reader);
@@ -303,19 +354,9 @@ function buildBranches(reader: SessionReader): BranchNode[] {
     const { entries, tail } = collectBranchEntries(start);
     const labels = labelsForEntries(reader, entries);
     const children = tail.children.map(buildBranch);
+    const summary = summarizeBranchEntries(entries);
     const startId = entries[0]!.id;
     const endId = entries[entries.length - 1]!.id;
-    const userCount = entries.filter((entry) => entry.entry.type === "message" && entry.entry.message.role === "user").length;
-    const assistantCount = entries.filter((entry) => entry.entry.type === "message" && entry.entry.message.role === "assistant").length;
-    const toolCallCount = entries.reduce((total, entry) => {
-      if (entry.entry.type !== "message" || entry.entry.message.role !== "assistant") return total;
-      return total + countToolCalls(entry.entry.message.content);
-    }, 0);
-    const textWordCount = entries.reduce((total, entry) => {
-      if (entry.entry.type === "branch_summary") return total + words(entry.entry.summary).length;
-      if (entry.entry.type === "compaction") return total + words(entry.entry.summary).length;
-      return total + countTextWords(entry.entry.message.content);
-    }, 0);
     const startedAt = entries[0]!.entry.timestamp;
     const endedAt = entries[entries.length - 1]!.entry.timestamp;
 
@@ -330,12 +371,12 @@ function buildBranches(reader: SessionReader): BranchNode[] {
       labels,
       active: entries.some((entry) => activeIds.has(entry.id)),
       activeLeaf: activeLeafId !== null && entries.some((entry) => entry.id === activeLeafId),
-      branchSummaryCount: entries.filter((entry) => entry.entry.type === "branch_summary").length,
-      compactionCount: entries.filter((entry) => entry.entry.type === "compaction").length,
-      userCount,
-      assistantCount,
-      toolCallCount,
-      textWordCount,
+      branchSummaryCount: summary.branchSummaryCount,
+      compactionCount: summary.compactionCount,
+      userCount: summary.userCount,
+      assistantCount: summary.assistantCount,
+      toolCallCount: summary.toolCallCount,
+      textWordCount: summary.textWordCount,
       startedAt,
       endedAt,
     };
@@ -613,17 +654,14 @@ class SessionSelectorComponent implements Component {
     for (let index = start; index < end; index++) {
       const session = this.sessions[index]!;
       const selected = index === this.selectedIndex;
-      const current = session.path === this.currentSessionPath;
-      const title = session.name?.trim() || shortWords(session.firstMessage || path.basename(session.path), 6);
-      const left = `${selected ? "→" : " "} ${title}`;
-      const right = `${session.messageCount} msgs · ${session.modified.toISOString().slice(0, 10)}${current ? " · current" : ""}`;
-      let line = left;
       const available = Math.max(1, width - 4);
-      const leftWidth = Math.max(10, available - visibleWidth(right) - 2);
-      line = truncateToWidth(left, leftWidth);
-      line = line + "  " + padLeftVisible(this.theme.fg("muted", right), Math.max(0, available - visibleWidth(line) - 2));
-      line = truncateToWidth(line, available);
-      const padded = padRightVisible(line, available);
+      const padded = formatSessionSelectorRow(
+        session,
+        selected,
+        this.currentSessionPath,
+        available,
+        this.theme,
+      );
       const styled = selected ? this.theme.bg("selectedBg", padded) : padded;
       container.addChild(new Text(styled, 1, 0));
       container.addChild(new Text(this.theme.fg("dim", abbreviatePath(session.cwd, Math.max(20, available - 2))), 3, 0));
@@ -640,6 +678,23 @@ class SessionSelectorComponent implements Component {
     this.cachedLines = container.render(width).map((line) => truncateToWidth(line, width));
     return this.cachedLines;
   }
+}
+
+function formatSessionSelectorRow(
+  session: SessionInfo,
+  selected: boolean,
+  currentSessionPath: string | undefined,
+  available: number,
+  theme: ThemeLike,
+): string {
+  const current = session.path === currentSessionPath;
+  const title = session.name?.trim() || shortWords(session.firstMessage || path.basename(session.path), 6);
+  const left = `${selected ? "→" : " "} ${title}`;
+  const right = `${session.messageCount} msgs · ${session.modified.toISOString().slice(0, 10)}${current ? " · current" : ""}`;
+  const leftWidth = Math.max(10, available - visibleWidth(right) - 2);
+  const truncatedLeft = truncateToWidth(left, leftWidth);
+  const joined = truncatedLeft + "  " + padLeftVisible(theme.fg("muted", right), Math.max(0, available - visibleWidth(truncatedLeft) - 2));
+  return padRightVisible(truncateToWidth(joined, available), available);
 }
 
 async function autoSummarizeBranches(
