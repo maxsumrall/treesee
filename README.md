@@ -22,8 +22,7 @@ Then reload pi:
 
 ```text
 /treesee             # current session
-/treesee select      # pick from sessions in the current project
-/treesee all         # pick from all projects
+/treesee open        # pick from all sessions
 /treesee /path/to/session.jsonl
 ```
 

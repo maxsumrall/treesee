@@ -609,7 +609,7 @@ class SessionSelectorComponent implements Component {
       const current = session.path === this.currentSessionPath;
       const title = session.name?.trim() || shortWords(session.firstMessage || path.basename(session.path), 6);
       const left = `${selected ? "→" : " "} ${title}`;
-      const right = `${session.modified.toISOString().slice(0, 10)}${current ? " · current" : ""}`;
+      const right = `${session.messageCount} msgs · ${session.modified.toISOString().slice(0, 10)}${current ? " · current" : ""}`;
       let line = left;
       const available = Math.max(1, width - 4);
       const leftWidth = Math.max(10, available - visibleWidth(right) - 2);
@@ -1306,21 +1306,16 @@ async function openHtmlFile(filePath: string, pi: ExtensionAPI): Promise<void> {
 
 async function chooseSession(
   ctx: ExtensionCommandContext,
-  scope: "current" | "all",
 ): Promise<SessionInfo | null> {
   const data = await ctx.ui.custom<SessionInfo[] | null>((tui, theme, _kb, done) => {
     const loader = new BorderedLoader(
       tui,
       theme,
-      scope === "all" ? "Loading sessions across all projects..." : "Loading sessions for current cwd...",
+      "Loading sessions...",
       { cancellable: false },
     );
 
-    const load = scope === "all"
-      ? SessionManager.listAll()
-      : SessionManager.list(ctx.cwd, ctx.sessionManager.getSessionDir());
-
-    load
+    SessionManager.listAll()
       .then((sessions) => {
         const sorted = [...sessions].sort((a, b) => b.modified.getTime() - a.modified.getTime());
         done(sorted);
@@ -1344,11 +1339,10 @@ async function chooseSession(
   });
 }
 
-function parseModeAndTarget(args: string): { mode: "current" | "select" | "all" | "path"; path?: string } {
+function parseModeAndTarget(args: string): { mode: "current" | "open" | "path"; path?: string } {
   const trimmed = args.trim();
   if (!trimmed) return { mode: "current" };
-  if (trimmed === "select") return { mode: "select" };
-  if (trimmed === "all") return { mode: "all" };
+  if (trimmed === "open") return { mode: "open" };
   if (trimmed.endsWith(".jsonl") || trimmed.startsWith("/") || trimmed.startsWith("~")) {
     const resolved = trimmed.startsWith("~") ? path.join(os.homedir(), trimmed.slice(1)) : trimmed;
     return { mode: "path", path: resolved };
@@ -1361,14 +1355,8 @@ async function openReaderForArgs(args: string, ctx: ExtensionCommandContext): Pr
 
   if (parsed.mode === "current") return ctx.sessionManager;
 
-  if (parsed.mode === "select") {
-    const selected = await chooseSession(ctx, "current");
-    if (!selected) return null;
-    return SessionManager.open(selected.path);
-  }
-
-  if (parsed.mode === "all") {
-    const selected = await chooseSession(ctx, "all");
+  if (parsed.mode === "open") {
+    const selected = await chooseSession(ctx);
     if (!selected) return null;
     return SessionManager.open(selected.path);
   }
