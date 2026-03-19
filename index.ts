@@ -1346,15 +1346,15 @@ async function chooseSession(
   });
 }
 
-function parseModeAndTarget(args: string): { mode: "current" | "open" | "path"; path?: string } {
+function parseModeAndTarget(args: string): { mode: "current" | "open" | "path" | "invalid"; path?: string; raw?: string } {
   const trimmed = args.trim();
   if (!trimmed) return { mode: "current" };
-  if (trimmed === "open" || trimmed === "all" || trimmed === "select") return { mode: "open" };
+  if (trimmed === "open") return { mode: "open" };
   if (trimmed.endsWith(".jsonl") || trimmed.startsWith("/") || trimmed.startsWith("~")) {
     const resolved = trimmed.startsWith("~") ? path.join(os.homedir(), trimmed.slice(1)) : trimmed;
     return { mode: "path", path: resolved };
   }
-  return { mode: "current" };
+  return { mode: "invalid", raw: trimmed };
 }
 
 async function openReaderForArgs(args: string, ctx: ExtensionCommandContext): Promise<SessionReader | null> {
@@ -1366,6 +1366,10 @@ async function openReaderForArgs(args: string, ctx: ExtensionCommandContext): Pr
     const selected = await chooseSession(ctx);
     if (!selected) return null;
     return SessionManager.open(selected.path);
+  }
+
+  if (parsed.mode === "invalid") {
+    throw new Error(`Unknown treesee argument: ${parsed.raw}. Use /treesee, /treesee open, or /treesee /path/to/session.jsonl`);
   }
 
   if (parsed.mode === "path" && parsed.path) {
