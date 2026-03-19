@@ -1349,7 +1349,7 @@ async function chooseSession(
 function parseModeAndTarget(args: string): { mode: "current" | "open" | "path"; path?: string } {
   const trimmed = args.trim();
   if (!trimmed) return { mode: "current" };
-  if (trimmed === "open") return { mode: "open" };
+  if (trimmed === "open" || trimmed === "all" || trimmed === "select") return { mode: "open" };
   if (trimmed.endsWith(".jsonl") || trimmed.startsWith("/") || trimmed.startsWith("~")) {
     const resolved = trimmed.startsWith("~") ? path.join(os.homedir(), trimmed.slice(1)) : trimmed;
     return { mode: "path", path: resolved };
