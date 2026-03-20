@@ -349,11 +349,22 @@ function buildBranches(reader: SessionReader): BranchNode[] {
   const roots = buildVisibleTree(reader);
   const activeIds = activeVisibleIds(reader);
   const activeLeafId = activeVisibleLeafId(reader);
+  const sortTime = (value: string): number => {
+    const time = new Date(value).getTime();
+    return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER;
+  };
 
   const buildBranch = (start: VisibleNode): BranchNode => {
     const { entries, tail } = collectBranchEntries(start);
     const labels = labelsForEntries(reader, entries);
-    const children = tail.children.map(buildBranch);
+    const children = tail.children
+      .map(buildBranch)
+      .sort((a, b) => {
+        const at = sortTime(a.startedAt);
+        const bt = sortTime(b.startedAt);
+        if (at !== bt) return at - bt;
+        return a.startId.localeCompare(b.startId);
+      });
     const summary = summarizeBranchEntries(entries);
     const startId = entries[0]!.id;
     const endId = entries[entries.length - 1]!.id;
@@ -806,8 +817,24 @@ function toHtmlBranchNode(branch: BranchNode): HtmlBranchNode {
   };
 }
 
+function isGenericSessionTitle(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return ["untitled branch", "conversation branch", "assistant step", "user turn"].includes(normalized);
+}
+
+function sessionSummaryTitle(data: TreeseeData): string {
+  const fallback = data.sessionName ?? abbreviatePath(data.sessionFile ?? data.cwd, 80);
+  const primaryRoot = data.roots.find((branch) => branch.active) ?? data.roots[0];
+  if (!primaryRoot) return fallback;
+
+  const label = branchLabel(primaryRoot).trim();
+  if (!label || isGenericSessionTitle(label)) return fallback;
+  return label;
+}
+
 function renderTreeseeHtml(data: TreeseeData): string {
   const payload = {
+    sessionTitle: sessionSummaryTitle(data),
     sessionName: data.sessionName ?? abbreviatePath(data.sessionFile ?? data.cwd, 80),
     sessionFile: data.sessionFile ?? data.cwd,
     roots: data.roots.map(toHtmlBranchNode),
@@ -818,7 +845,7 @@ function renderTreeseeHtml(data: TreeseeData): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${escapeHtml(payload.sessionName)} · treesee</title>
+  <title>${escapeHtml(payload.sessionTitle)} · treesee</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; }
 
@@ -873,6 +900,12 @@ function renderTreeseeHtml(data: TreeseeData): string {
       font-weight: 700;
       letter-spacing: -.02em;
       color: #e6edf3;
+      margin: 0 0 4px;
+    }
+
+    .session-subtitle {
+      font-size: 12px;
+      color: #9fb0c3;
       margin: 0 0 4px;
     }
 
@@ -1088,7 +1121,8 @@ function renderTreeseeHtml(data: TreeseeData): string {
 </head>
 <body>
   <header>
-    <h1 class="session-name">${escapeHtml(payload.sessionName)}</h1>
+    <h1 class="session-name">${escapeHtml(payload.sessionTitle)}</h1>
+    ${payload.sessionTitle !== payload.sessionName ? `<p class="session-subtitle">${escapeHtml(payload.sessionName)}</p>` : ""}
     <p class="session-path">${escapeHtml(payload.sessionFile)}</p>
   </header>
 
@@ -1118,6 +1152,10 @@ function renderTreeseeHtml(data: TreeseeData): string {
 
     // ── constants ──────────────────────────────────────────
     const NODE_W = 224;
+    const STACK_CHILD_THRESHOLD = 3;
+    const STACK_CHILD_MAX_WIDTH = 960;
+    const STACK_INDENT = 56;
+    const STACK_GAP = 22;
     const X_GAP  = 40;   // gap between sibling subtrees
     const Y_GAP  = 60;   // vertical gap between depth levels
     const H_PAD  = 48;   // canvas left/right padding
@@ -1138,45 +1176,67 @@ function renderTreeseeHtml(data: TreeseeData): string {
       return Math.max(88, 71 + Math.ceil(cnt / 3) * 25);
     }
 
-    // ── subtree width (post-order) ─────────────────────────
+    function stackChildren(n, childWidth) {
+      return n.children.length >= STACK_CHILD_THRESHOLD || childWidth > STACK_CHILD_MAX_WIDTH;
+    }
+
+    function childMetrics(children) {
+      return {
+        rowWidth: children.reduce((s, c) => s + c.sw, 0) + X_GAP * (children.length - 1),
+        maxWidth: children.reduce((m, c) => Math.max(m, c.sw), 0),
+        stackHeight: children.reduce((s, c) => s + c.sh, 0) + STACK_GAP * (children.length - 1),
+        maxHeight: children.reduce((m, c) => Math.max(m, c.sh), 0),
+      };
+    }
+
+    // ── subtree size (post-order) ──────────────────────────
     function subW(n) {
       n.w = NODE_W;
       n.h = nodeH(n);
-      if (!n.children.length) { n.sw = NODE_W; return; }
+      if (!n.children.length) {
+        n.stack = false;
+        n.sw = NODE_W;
+        n.sh = n.h;
+        return;
+      }
+
       n.children.forEach(subW);
-      const cw = n.children.reduce((s, c) => s + c.sw, 0) + X_GAP * (n.children.length - 1);
-      n.sw = Math.max(NODE_W, cw);
-    }
+      const metrics = childMetrics(n.children);
+      n.childRowWidth = metrics.rowWidth;
+      n.stack = stackChildren(n, metrics.rowWidth);
 
-    // ── per-depth max heights ──────────────────────────────
-    function maxDepthH(roots) {
-      const m = {};
-      const walk = (n, d) => {
-        m[d] = Math.max(m[d] || 0, n.h);
-        n.children.forEach(c => walk(c, d + 1));
-      };
-      roots.forEach(r => walk(r, 0));
-      return m;
-    }
+      if (n.stack) {
+        n.sw = Math.max(NODE_W, STACK_INDENT + metrics.maxWidth);
+        n.sh = n.h + Y_GAP + metrics.stackHeight;
+        return;
+      }
 
-    function depthOffsets(depthH) {
-      const off = {};
-      let y = V_PAD;
-      Object.keys(depthH).map(Number).sort((a, b) => a - b).forEach(d => {
-        off[d] = y;
-        y += depthH[d] + Y_GAP;
-      });
-      return off;
+      n.sw = Math.max(NODE_W, metrics.rowWidth);
+      n.sh = n.h + Y_GAP + metrics.maxHeight;
     }
 
     // ── x/y positions (pre-order) ──────────────────────────
-    function pos(n, d, lx, dOff) {
-      n.x = lx + (n.sw - NODE_W) / 2;
-      n.y = dOff[d] !== undefined ? dOff[d] : V_PAD;
+    function pos(n, lx, ty) {
+      n.x = n.stack ? lx : lx + (n.sw - NODE_W) / 2;
+      n.y = ty;
       if (!n.children.length) return;
-      const cw = n.children.reduce((s, c) => s + c.sw, 0) + X_GAP * (n.children.length - 1);
-      let cx = lx + (n.sw - cw) / 2;
-      n.children.forEach(c => { pos(c, d + 1, cx, dOff); cx += c.sw + X_GAP; });
+
+      const childTop = ty + n.h + Y_GAP;
+      if (n.stack) {
+        let cy = childTop;
+        const childX = lx + STACK_INDENT;
+        n.children.forEach(c => {
+          pos(c, childX, cy);
+          cy += c.sh + STACK_GAP;
+        });
+        return;
+      }
+
+      let cx = lx + (n.sw - n.childRowWidth) / 2;
+      n.children.forEach(c => {
+        pos(c, cx, childTop);
+        cx += c.sw + X_GAP;
+      });
     }
 
     // ── run layout ─────────────────────────────────────────
@@ -1184,12 +1244,9 @@ function renderTreeseeHtml(data: TreeseeData): string {
     const flatten = n => { all.push(n); n.children.forEach(flatten); };
     data.roots.forEach(r => { subW(r); flatten(r); });
 
-    const dH   = maxDepthH(data.roots);
-    const dOff = depthOffsets(dH);
-
     let rlx = H_PAD;
     data.roots.forEach(r => {
-      pos(r, 0, rlx, dOff);
+      pos(r, rlx, V_PAD);
       rlx += r.sw + X_GAP * 2;
     });
 
@@ -1209,7 +1266,50 @@ function renderTreeseeHtml(data: TreeseeData): string {
     svg.setAttribute('viewBox', '0 0 ' + cw + ' ' + ch);
     canvas.appendChild(svg);
 
+    function applyEdgeStyle(el, activeLeaf, activePath) {
+      el.setAttribute('fill', 'none');
+      el.setAttribute('stroke-linecap', 'round');
+
+      if (activeLeaf) {
+        el.setAttribute('stroke', '#3fb950');
+        el.setAttribute('stroke-width', '2.5');
+        el.setAttribute('opacity', '0.9');
+      } else if (activePath) {
+        el.setAttribute('stroke', '#58a6ff');
+        el.setAttribute('stroke-width', '2');
+        el.setAttribute('opacity', '0.7');
+      } else {
+        el.setAttribute('stroke', '#222c3a');
+        el.setAttribute('stroke-width', '1.5');
+        el.setAttribute('opacity', '0.85');
+      }
+    }
+
+    function appendEdge(pathData, activeLeaf, activePath) {
+      const path = document.createElementNS(NS, 'path');
+      path.setAttribute('d', pathData);
+      applyEdgeStyle(path, activeLeaf, activePath);
+      svg.appendChild(path);
+    }
+
     all.forEach(n => {
+      if (n.stack && n.children.length) {
+        const trunkX = n.x + 20;
+        const startY = n.y + n.h;
+        const endY = n.children[n.children.length - 1].y + n.children[n.children.length - 1].h / 2;
+        appendEdge(
+          'M ' + trunkX + ' ' + startY + ' V ' + endY,
+          n.children.some(c => c.activeLeaf),
+          n.active || n.children.some(c => c.active),
+        );
+
+        n.children.forEach(c => {
+          const y = c.y + c.h / 2;
+          appendEdge('M ' + trunkX + ' ' + y + ' H ' + c.x, c.activeLeaf, c.active || n.active);
+        });
+        return;
+      }
+
       n.children.forEach(c => {
         // vertical S-curve: bottom-centre of parent → top-centre of child
         const x1 = n.x + NODE_W / 2;
@@ -1218,27 +1318,12 @@ function renderTreeseeHtml(data: TreeseeData): string {
         const y2 = c.y;
         const my = (y1 + y2) / 2;
 
-        const p = document.createElementNS(NS, 'path');
-        p.setAttribute('d',
+        appendEdge(
           'M ' + x1 + ' ' + y1 +
-          ' C ' + x1 + ' ' + my + ', ' + x2 + ' ' + my + ', ' + x2 + ' ' + y2);
-        p.setAttribute('fill', 'none');
-        p.setAttribute('stroke-linecap', 'round');
-
-        if (c.activeLeaf) {
-          p.setAttribute('stroke', '#3fb950');
-          p.setAttribute('stroke-width', '2.5');
-          p.setAttribute('opacity', '0.9');
-        } else if (c.active || n.active) {
-          p.setAttribute('stroke', '#58a6ff');
-          p.setAttribute('stroke-width', '2');
-          p.setAttribute('opacity', '0.7');
-        } else {
-          p.setAttribute('stroke', '#222c3a');
-          p.setAttribute('stroke-width', '1.5');
-          p.setAttribute('opacity', '0.85');
-        }
-        svg.appendChild(p);
+          ' C ' + x1 + ' ' + my + ', ' + x2 + ' ' + my + ', ' + x2 + ' ' + y2,
+          c.activeLeaf,
+          c.active || n.active,
+        );
       });
     });
 
@@ -1262,8 +1347,37 @@ function renderTreeseeHtml(data: TreeseeData): string {
         .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     }
 
+    function nodeState(n) {
+      if (n.activeLeaf) {
+        return {
+          nodeClass: ' active-leaf',
+          tooltipState: 'active-leaf',
+          tooltipStateLabel: 'active leaf',
+          dotClass: 'leaf',
+          badge: ['active', 's-leaf'],
+        };
+      }
+      if (n.active) {
+        return {
+          nodeClass: ' active-path',
+          tooltipState: 'active-path',
+          tooltipStateLabel: 'on active path',
+          dotClass: 'active',
+          badge: ['on path', 's-path'],
+        };
+      }
+      return {
+        nodeClass: '',
+        tooltipState: '',
+        tooltipStateLabel: 'idle branch',
+        dotClass: 'idle',
+        badge: null,
+      };
+    }
+
     all.forEach(n => {
-      const el = mkdiv('node' + (n.activeLeaf ? ' active-leaf' : n.active ? ' active-path' : ''));
+      const state = nodeState(n);
+      const el = mkdiv('node' + state.nodeClass);
       el.style.left   = n.x + 'px';
       el.style.top    = n.y + 'px';
       el.style.width  = NODE_W + 'px';
@@ -1279,13 +1393,13 @@ function renderTreeseeHtml(data: TreeseeData): string {
         dur:     n.durationLabel || '',
         labels:  n.labels || [],
         started: n.startedAt ? new Date(n.startedAt).toLocaleString() : '',
-        state:   n.activeLeaf ? 'active-leaf' : n.active ? 'active-path' : '',
-        stateLabel: n.activeLeaf ? 'active leaf' : n.active ? 'on active path' : 'idle branch',
+        state:   state.tooltipState,
+        stateLabel: state.tooltipStateLabel,
       });
 
       // header: dot + title
       const hdr   = mkdiv('node-header');
-      const dot   = mkdiv('dot ' + (n.activeLeaf ? 'leaf' : n.active ? 'active' : 'idle'));
+      const dot   = mkdiv('dot ' + state.dotClass);
       const title = mkdiv('node-title');
       title.textContent = n.label;
       hdr.appendChild(dot);
@@ -1300,8 +1414,7 @@ function renderTreeseeHtml(data: TreeseeData): string {
       if (n.durationLabel)           bg.appendChild(badge(n.durationLabel, 'dur'));
       if (n.branchSummaryCount > 0)  bg.appendChild(badge('summary×' + n.branchSummaryCount, 'bs'));
       if (n.compactionCount > 0)     bg.appendChild(badge('compact×' + n.compactionCount, 'comp'));
-      if (n.activeLeaf)              bg.appendChild(badge('active', 's-leaf'));
-      else if (n.active)             bg.appendChild(badge('on path', 's-path'));
+      if (state.badge)               bg.appendChild(badge(state.badge[0], state.badge[1]));
       if (n.labels && n.labels.length > 0) {
         n.labels.slice(0, 2).forEach(l => bg.appendChild(badge('#' + l, 'lbl')));
       }
